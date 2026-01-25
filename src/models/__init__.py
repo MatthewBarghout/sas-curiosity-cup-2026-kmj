@@ -8,6 +8,8 @@ from .backtester import (
     Backtester,
     PerformanceMetrics,
     WalkForwardAnalyzer,
+    COVIDBacktester,
+    run_covid_backtest,
     format_metrics_report
 )
 
@@ -18,5 +20,7 @@ __all__ = [
     'Backtester',
     'PerformanceMetrics',
     'WalkForwardAnalyzer',
+    'COVIDBacktester',
+    'run_covid_backtest',
     'format_metrics_report'
 ]

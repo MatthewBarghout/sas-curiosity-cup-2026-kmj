@@ -15,6 +15,13 @@ from .multi_stock_fetch import (
     get_default_stock_universe
 )
 
+from .sentiment import (
+    GoogleTrendsSentiment,
+    download_google_trends,
+    get_sentiment_score,
+    download_ai_nvda_sentiment
+)
+
 __all__ = [
     # Single stock functions
     'download_stock_data',
@@ -24,5 +31,10 @@ __all__ = [
     # Multi-stock classes and functions
     'MultiStockDataPipeline',
     'fetch_multiple_stocks',
-    'get_default_stock_universe'
+    'get_default_stock_universe',
+    # Sentiment analysis
+    'GoogleTrendsSentiment',
+    'download_google_trends',
+    'get_sentiment_score',
+    'download_ai_nvda_sentiment'
 ]

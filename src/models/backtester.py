@@ -532,6 +532,372 @@ def format_metrics_report(metrics: Dict) -> str:
     return "\n".join(lines)
 
 
+class COVIDBacktester:
+    """
+    Specialized backtester for analyzing COVID crash period (Feb-Apr 2020).
+
+    Compares Monte Carlo predicted drawdowns with actual market drawdowns
+    during the COVID-19 market crash.
+    """
+
+    # COVID crash period dates
+    COVID_START = '2020-02-19'  # Market peak before crash
+    COVID_BOTTOM = '2020-03-23'  # Market bottom
+    COVID_END = '2020-04-30'     # Recovery period end
+
+    def __init__(self, tickers: List[str] = None):
+        """
+        Initialize COVID backtester.
+
+        Args:
+            tickers: List of stock tickers to analyze. Defaults to ['NVDA', 'SPY', 'AAPL']
+        """
+        self.tickers = tickers or ['NVDA', 'SPY', 'AAPL']
+        self.prices_data = {}
+        self.returns_data = {}
+        self.crash_results = {}
+
+    def fetch_covid_period_data(self,
+                                 start_date: str = '2020-01-01',
+                                 end_date: str = '2020-06-30') -> Dict[str, pd.DataFrame]:
+        """
+        Fetch stock data covering the COVID crash period.
+
+        Args:
+            start_date: Start date for data fetch (before crash)
+            end_date: End date for data fetch (after recovery begins)
+
+        Returns:
+            Dictionary of ticker -> DataFrame with price data
+        """
+        import yfinance as yf
+
+        print(f"Fetching COVID period data for {self.tickers}...")
+
+        for ticker in self.tickers:
+            try:
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                if len(data) > 0:
+                    self.prices_data[ticker] = data
+                    self.returns_data[ticker] = data['Close'].pct_change().dropna()
+                    print(f"  {ticker}: {len(data)} days of data")
+                else:
+                    print(f"  {ticker}: No data available")
+            except Exception as e:
+                print(f"  {ticker}: Error fetching - {e}")
+
+        return self.prices_data
+
+    def analyze_crash_drawdown(self, ticker: str) -> Dict:
+        """
+        Analyze the actual drawdown during COVID crash for a single ticker.
+
+        Args:
+            ticker: Stock ticker symbol
+
+        Returns:
+            Dictionary with drawdown analysis
+        """
+        if ticker not in self.prices_data:
+            raise ValueError(f"No data for {ticker}. Call fetch_covid_period_data first.")
+
+        df = self.prices_data[ticker]
+        prices = df['Close']
+
+        # Flatten multi-level column index if present
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+
+        # Find peak before crash
+        pre_crash = prices[prices.index <= self.COVID_START]
+        if len(pre_crash) == 0:
+            peak_price = float(prices.iloc[0])
+            peak_date = prices.index[0]
+        else:
+            peak_price = float(pre_crash.max())
+            peak_date = pre_crash.idxmax()
+            if isinstance(peak_date, pd.Series):
+                peak_date = peak_date.iloc[0]
+
+        # Find bottom during crash
+        crash_period = prices[(prices.index >= self.COVID_START) &
+                              (prices.index <= self.COVID_BOTTOM)]
+        if len(crash_period) > 0:
+            bottom_price = float(crash_period.min())
+            bottom_date = crash_period.idxmin()
+            if isinstance(bottom_date, pd.Series):
+                bottom_date = bottom_date.iloc[0]
+        else:
+            bottom_price = float(prices.min())
+            bottom_date = prices.idxmin()
+            if isinstance(bottom_date, pd.Series):
+                bottom_date = bottom_date.iloc[0]
+
+        # Calculate actual drawdown
+        actual_drawdown = (peak_price - bottom_price) / peak_price
+
+        # Recovery analysis
+        recovery_period = prices[prices.index >= self.COVID_BOTTOM]
+        recovery_to_peak_date = None
+        days_to_recover = None
+
+        if len(recovery_period) > 0:
+            recovered = recovery_period[recovery_period >= peak_price]
+            if len(recovered) > 0:
+                recovery_to_peak_date = recovered.index[0]
+                # Convert to datetime if needed
+                if hasattr(bottom_date, 'to_pydatetime'):
+                    bottom_dt = bottom_date.to_pydatetime()
+                else:
+                    bottom_dt = pd.to_datetime(bottom_date)
+                if hasattr(recovery_to_peak_date, 'to_pydatetime'):
+                    recovery_dt = recovery_to_peak_date.to_pydatetime()
+                else:
+                    recovery_dt = pd.to_datetime(recovery_to_peak_date)
+                days_to_recover = (recovery_dt - bottom_dt).days
+
+        return {
+            'ticker': ticker,
+            'peak_price': float(peak_price),
+            'peak_date': str(peak_date.date()) if hasattr(peak_date, 'date') else str(peak_date),
+            'bottom_price': float(bottom_price),
+            'bottom_date': str(bottom_date.date()) if hasattr(bottom_date, 'date') else str(bottom_date),
+            'actual_drawdown': float(actual_drawdown),
+            'actual_drawdown_pct': f"{actual_drawdown * 100:.2f}%",
+            'recovery_date': str(recovery_to_peak_date.date()) if recovery_to_peak_date and hasattr(recovery_to_peak_date, 'date') else None,
+            'days_to_recover': days_to_recover
+        }
+
+    def run_monte_carlo_prediction(self, ticker: str,
+                                    pre_crash_lookback_days: int = 252,
+                                    n_simulations: int = 10000,
+                                    forecast_days: int = 30) -> Dict:
+        """
+        Run Monte Carlo simulation using pre-crash data to see what it would have predicted.
+
+        Args:
+            ticker: Stock ticker
+            pre_crash_lookback_days: Days of data before crash to use for parameters
+            n_simulations: Number of MC simulations
+            forecast_days: Days to forecast (crash period was ~23 trading days)
+
+        Returns:
+            Dictionary with MC predictions and VaR/CVaR analysis
+        """
+        if ticker not in self.prices_data:
+            raise ValueError(f"No data for {ticker}. Call fetch_covid_period_data first.")
+
+        df = self.prices_data[ticker]
+
+        # Get pre-crash data for parameter estimation
+        pre_crash_data = df[df.index < self.COVID_START]
+
+        if len(pre_crash_data) < 20:
+            # If not enough pre-crash data in our range, fetch more
+            import yfinance as yf
+            extended_start = (pd.to_datetime(self.COVID_START) -
+                            pd.Timedelta(days=pre_crash_lookback_days * 2)).strftime('%Y-%m-%d')
+            extended_data = yf.download(ticker, start=extended_start,
+                                       end=self.COVID_START, progress=False)
+            pre_crash_data = extended_data.tail(pre_crash_lookback_days)
+
+        # Calculate parameters from pre-crash data
+        close_prices = pre_crash_data['Close']
+        # Flatten multi-level column if present
+        if isinstance(close_prices, pd.DataFrame):
+            close_prices = close_prices.iloc[:, 0]
+
+        pre_crash_returns = close_prices.pct_change().dropna()
+        daily_mu = float(pre_crash_returns.mean())
+        daily_sigma = float(pre_crash_returns.std())
+
+        # Starting price (day before crash)
+        S0 = float(close_prices.iloc[-1])
+
+        # Run Monte Carlo simulation
+        dt = 1 / 252  # Daily time step
+        np.random.seed(42)  # For reproducibility
+
+        # Simulate paths
+        paths = np.zeros((n_simulations, forecast_days + 1))
+        paths[:, 0] = S0
+
+        for t in range(1, forecast_days + 1):
+            z = np.random.standard_normal(n_simulations)
+            paths[:, t] = paths[:, t-1] * np.exp(
+                (daily_mu - 0.5 * daily_sigma**2) + daily_sigma * z
+            )
+
+        # Calculate drawdowns from each simulation
+        peak_prices = np.maximum.accumulate(paths, axis=1)
+        drawdowns = (peak_prices - paths) / peak_prices
+        max_drawdowns = np.max(drawdowns, axis=1)
+
+        # Calculate VaR and CVaR for drawdowns
+        var_95 = np.percentile(max_drawdowns, 95)
+        var_99 = np.percentile(max_drawdowns, 99)
+        cvar_95 = np.mean(max_drawdowns[max_drawdowns >= var_95])
+        cvar_99 = np.mean(max_drawdowns[max_drawdowns >= var_99])
+
+        # Final prices
+        final_prices = paths[:, -1]
+
+        return {
+            'ticker': ticker,
+            'S0': S0,
+            'daily_mu': float(daily_mu),
+            'daily_sigma': float(daily_sigma),
+            'annual_mu': float(daily_mu * 252),
+            'annual_sigma': float(daily_sigma * np.sqrt(252)),
+            'n_simulations': n_simulations,
+            'forecast_days': forecast_days,
+            'predicted_drawdown_mean': float(np.mean(max_drawdowns)),
+            'predicted_drawdown_median': float(np.median(max_drawdowns)),
+            'predicted_drawdown_std': float(np.std(max_drawdowns)),
+            'var_95': float(var_95),
+            'var_99': float(var_99),
+            'cvar_95': float(cvar_95),
+            'cvar_99': float(cvar_99),
+            'predicted_final_price_mean': float(np.mean(final_prices)),
+            'predicted_final_price_5th': float(np.percentile(final_prices, 5)),
+            'predicted_final_price_95th': float(np.percentile(final_prices, 95)),
+            'paths': paths,
+            'max_drawdowns': max_drawdowns
+        }
+
+    def run_covid_backtest(self, n_simulations: int = 10000) -> Dict:
+        """
+        Run full COVID backtest comparing predicted vs actual drawdowns.
+
+        Args:
+            n_simulations: Number of Monte Carlo simulations
+
+        Returns:
+            Dictionary with complete backtest results
+        """
+        if not self.prices_data:
+            self.fetch_covid_period_data()
+
+        results = {}
+
+        for ticker in self.tickers:
+            if ticker not in self.prices_data:
+                continue
+
+            print(f"\nAnalyzing {ticker}...")
+
+            # Get actual drawdown
+            actual = self.analyze_crash_drawdown(ticker)
+
+            # Get MC predictions (using 30 trading days to cover crash period)
+            predicted = self.run_monte_carlo_prediction(
+                ticker,
+                n_simulations=n_simulations,
+                forecast_days=30
+            )
+
+            # Compare predicted vs actual
+            actual_dd = actual['actual_drawdown']
+            predicted_mean = predicted['predicted_drawdown_mean']
+            var_95 = predicted['var_95']
+            var_99 = predicted['var_99']
+
+            # Was actual drawdown within predictions?
+            was_captured_by_var95 = actual_dd <= var_95
+            was_captured_by_var99 = actual_dd <= var_99
+
+            # Percentile of actual drawdown in simulated distribution
+            actual_percentile = np.mean(predicted['max_drawdowns'] <= actual_dd) * 100
+
+            results[ticker] = {
+                'actual': actual,
+                'predicted': {
+                    'drawdown_mean': predicted['predicted_drawdown_mean'],
+                    'drawdown_median': predicted['predicted_drawdown_median'],
+                    'var_95': predicted['var_95'],
+                    'var_99': predicted['var_99'],
+                    'cvar_95': predicted['cvar_95'],
+                    'cvar_99': predicted['cvar_99']
+                },
+                'comparison': {
+                    'actual_drawdown': actual_dd,
+                    'predicted_mean_drawdown': predicted_mean,
+                    'prediction_error': actual_dd - predicted_mean,
+                    'prediction_error_pct': f"{(actual_dd - predicted_mean) * 100:.2f}%",
+                    'actual_percentile': f"{actual_percentile:.1f}%",
+                    'captured_by_var95': was_captured_by_var95,
+                    'captured_by_var99': was_captured_by_var99,
+                    'var95_vs_actual': f"VaR95 {var_95*100:.1f}% vs Actual {actual_dd*100:.1f}%"
+                },
+                'model_params': {
+                    'S0': predicted['S0'],
+                    'annual_mu': predicted['annual_mu'],
+                    'annual_sigma': predicted['annual_sigma']
+                }
+            }
+
+        self.crash_results = results
+        return results
+
+    def format_backtest_report(self) -> str:
+        """Generate formatted report of COVID backtest results."""
+        if not self.crash_results:
+            return "No results available. Run run_covid_backtest() first."
+
+        lines = [
+            "=" * 70,
+            "COVID-19 CRASH BACKTEST RESULTS (Feb-Apr 2020)",
+            "=" * 70,
+            ""
+        ]
+
+        for ticker, data in self.crash_results.items():
+            actual = data['actual']
+            predicted = data['predicted']
+            comparison = data['comparison']
+
+            lines.extend([
+                f"--- {ticker} ---",
+                f"Peak Date: {actual['peak_date']} | Peak Price: ${actual['peak_price']:.2f}",
+                f"Bottom Date: {actual['bottom_date']} | Bottom Price: ${actual['bottom_price']:.2f}",
+                f"",
+                f"ACTUAL Drawdown: {actual['actual_drawdown_pct']}",
+                f"PREDICTED Mean Drawdown: {predicted['drawdown_mean']*100:.2f}%",
+                f"PREDICTED VaR 95%: {predicted['var_95']*100:.2f}%",
+                f"PREDICTED VaR 99%: {predicted['var_99']*100:.2f}%",
+                f"",
+                f"Prediction Error: {comparison['prediction_error_pct']}",
+                f"Actual was at {comparison['actual_percentile']} percentile of predictions",
+                f"Captured by VaR95: {'✓' if comparison['captured_by_var95'] else '✗'}",
+                f"Captured by VaR99: {'✓' if comparison['captured_by_var99'] else '✗'}",
+                f"",
+                f"Days to Recover: {actual['days_to_recover'] or 'N/A'}",
+                ""
+            ])
+
+        lines.append("=" * 70)
+        return "\n".join(lines)
+
+
+def run_covid_backtest(tickers: List[str] = None,
+                       n_simulations: int = 10000) -> Dict:
+    """
+    Convenience function to run COVID backtest.
+
+    Args:
+        tickers: List of stock tickers (defaults to ['NVDA', 'SPY', 'AAPL'])
+        n_simulations: Number of Monte Carlo simulations
+
+    Returns:
+        Dictionary with backtest results
+    """
+    backtester = COVIDBacktester(tickers)
+    backtester.fetch_covid_period_data()
+    results = backtester.run_covid_backtest(n_simulations)
+    print(backtester.format_backtest_report())
+    return results
+
+
 # Testing
 if __name__ == "__main__":
     print("Testing Backtester Framework...\n")
