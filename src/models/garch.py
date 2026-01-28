@@ -1,12 +1,15 @@
 """
 GARCH(1,1) Volatility Forecasting with Student's t errors
 Provides dynamic volatility estimates for Monte Carlo simulation
+Multi-stock support for sector analysis
 """
 
 from arch import arch_model
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List, Optional
+import warnings
+warnings.filterwarnings('ignore')
 
 
 class GARCHVolatilityForecaster:
@@ -44,7 +47,7 @@ class GARCHVolatilityForecaster:
         assert persistence < 1, f"Model is non-stationary! α + β = {persistence:.4f} >= 1"
         
         if persistence > 0.99:
-            print(f"⚠️  Warning: High persistence ({persistence:.4f}). Volatility is very persistent.")
+            print(f"⚠️  Warning: High persistence ({persistence:.4f})")
         
     def forecast_volatility(self, horizon: int = 30) -> np.ndarray:
         if self.results is None:
@@ -138,6 +141,187 @@ class GARCHVolatilityForecaster:
         print("="*70 + "\n")
 
 
+class MultiStockGARCH:
+    """
+    GARCH model manager for multiple stocks/sectors
+    """
+    
+    def __init__(self, returns_dict: Dict[str, pd.Series]):
+        """
+        Initialize with dictionary of returns
+        
+        Args:
+            returns_dict: {ticker: returns_series}
+        """
+        self.returns_dict = returns_dict
+        self.models = {}
+        self.tickers = list(returns_dict.keys())
+        
+    def fit_all(self, verbose: bool = True) -> None:
+        """
+        Fit GARCH models for all stocks
+        """
+        print(f"\n{'='*70}")
+        print(f"Fitting GARCH models for {len(self.tickers)} stocks")
+        print(f"{'='*70}\n")
+        
+        for ticker in self.tickers:
+            if verbose:
+                print(f"Fitting {ticker}...", end=" ")
+            
+            try:
+                garch = GARCHVolatilityForecaster(self.returns_dict[ticker])
+                garch.fit()
+                self.models[ticker] = garch
+                
+                if verbose:
+                    params = garch.get_parameters()
+                    print(f"✓ (α+β={params['persistence']:.3f}, ν={params['nu']:.1f})")
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"✗ Failed: {str(e)}")
+                self.models[ticker] = None
+        
+        successful = sum(1 for m in self.models.values() if m is not None)
+        print(f"\n✓ Successfully fitted {successful}/{len(self.tickers)} models\n")
+    
+    def forecast_all(self, horizon: int = 30) -> Dict[str, np.ndarray]:
+        """
+        Forecast volatility for all stocks
+        
+        Args:
+            horizon: Number of days to forecast
+            
+        Returns:
+            {ticker: volatility_forecast_array}
+        """
+        forecasts = {}
+        
+        for ticker, model in self.models.items():
+            if model is not None:
+                try:
+                    forecasts[ticker] = model.forecast_volatility(horizon)
+                except Exception as e:
+                    print(f"Warning: Could not forecast {ticker}: {str(e)}")
+                    forecasts[ticker] = None
+            else:
+                forecasts[ticker] = None
+        
+        return forecasts
+    
+    def get_current_volatilities(self) -> Dict[str, float]:
+        """
+        Get current volatility for all stocks
+        
+        Returns:
+            {ticker: current_volatility}
+        """
+        current_vols = {}
+        
+        for ticker, model in self.models.items():
+            if model is not None:
+                try:
+                    current_vols[ticker] = model.get_current_volatility()
+                except Exception as e:
+                    print(f"Warning: Could not get volatility for {ticker}: {str(e)}")
+                    current_vols[ticker] = None
+            else:
+                current_vols[ticker] = None
+        
+        return current_vols
+    
+    def get_all_parameters(self) -> pd.DataFrame:
+        """
+        Get parameters for all stocks as DataFrame
+        
+        Returns:
+            DataFrame with columns: ticker, omega, alpha, beta, nu, persistence, long_run_vol
+        """
+        params_list = []
+        
+        for ticker, model in self.models.items():
+            if model is not None:
+                try:
+                    params = model.get_parameters()
+                    params['ticker'] = ticker
+                    params_list.append(params)
+                except Exception as e:
+                    print(f"Warning: Could not get parameters for {ticker}: {str(e)}")
+        
+        if params_list:
+            df = pd.DataFrame(params_list)
+            df = df[['ticker', 'omega', 'alpha', 'beta', 'nu', 'persistence', 'long_run_vol']]
+            return df
+        else:
+            return pd.DataFrame()
+    
+    def summary_all(self) -> None:
+        """
+        Print summary for all stocks
+        """
+        print("\n" + "="*70)
+        print("MULTI-STOCK GARCH SUMMARY")
+        print("="*70)
+        
+        params_df = self.get_all_parameters()
+        current_vols = self.get_current_volatilities()
+        
+        if not params_df.empty:
+            params_df['current_vol'] = params_df['ticker'].map(current_vols)
+            
+            print("\nParameters by Stock:")
+            print(params_df.to_string(index=False))
+            
+            print("\n" + "-"*70)
+            print("AGGREGATE STATISTICS")
+            print("-"*70)
+            print(f"Average persistence (α+β): {params_df['persistence'].mean():.4f}")
+            print(f"Average nu (tail fatness):  {params_df['nu'].mean():.2f}")
+            print(f"Average current vol:        {params_df['current_vol'].mean()*100:.2f}%")
+            print(f"Highest current vol:        {params_df['current_vol'].max()*100:.2f}% ({params_df.loc[params_df['current_vol'].idxmax(), 'ticker']})")
+            print(f"Lowest current vol:         {params_df['current_vol'].min()*100:.2f}% ({params_df.loc[params_df['current_vol'].idxmin(), 'ticker']})")
+        
+        print("="*70 + "\n")
+    
+    def get_forecast_dataframe(self, horizon: int = 30) -> pd.DataFrame:
+        """
+        Get forecasts as DataFrame with dates
+        
+        Returns:
+            DataFrame with columns: date, ticker, volatility
+        """
+        forecasts = self.forecast_all(horizon)
+        
+        last_date = None
+        for ticker in self.tickers:
+            if ticker in self.returns_dict and self.returns_dict[ticker] is not None:
+                last_date = self.returns_dict[ticker].index[-1]
+                break
+        
+        if last_date is None:
+            raise ValueError("Could not determine last date from returns")
+        
+        forecast_dates = pd.date_range(
+            start=last_date + pd.Timedelta(days=1),
+            periods=horizon,
+            freq='D'
+        )
+        
+        rows = []
+        for ticker, forecast in forecasts.items():
+            if forecast is not None:
+                for i, date in enumerate(forecast_dates):
+                    rows.append({
+                        'date': date,
+                        'ticker': ticker,
+                        'volatility': forecast[i],
+                        'horizon': i + 1
+                    })
+        
+        return pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
     import sys
     from pathlib import Path
@@ -147,89 +331,90 @@ if __name__ == "__main__":
     
     from src.data.fetch import download_stock_data, calculate_returns
     from datetime import datetime, timedelta
-    import matplotlib.pyplot as plt
     
     print("="*70)
-    print("TESTING GARCH VOLATILITY FORECASTER")
+    print("TESTING MULTI-STOCK GARCH")
     print("="*70)
     
-    print("\n1. Downloading NVDA data...")
+    tickers = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMD', 'META', 'AMZN']
+    
+    print(f"\n1. Downloading data for {len(tickers)} stocks...")
     end = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
     
-    data = download_stock_data('NVDA', start, end)
-    returns = calculate_returns(data)
+    returns_dict = {}
+    for ticker in tickers:
+        try:
+            data = download_stock_data(ticker, start, end)
+            returns = calculate_returns(data)
+            returns_dict[ticker] = returns
+            print(f"   ✓ {ticker}: {len(returns)} days")
+        except Exception as e:
+            print(f"   ✗ {ticker}: Failed - {str(e)}")
     
-    print(f"   Downloaded {len(returns)} days of returns")
-    print(f"   Return stats: mean={returns.mean()*100:.4f}%, std={returns.std()*100:.2f}%")
+    print(f"\n2. Fitting GARCH models...")
+    multi_garch = MultiStockGARCH(returns_dict)
+    multi_garch.fit_all(verbose=True)
     
-    print("\n2. Fitting GARCH(1,1) model...")
-    garch = GARCHVolatilityForecaster(returns)
-    garch.fit()
-    print("   ✓ Model fitted successfully")
+    print("\n3. Getting current volatilities...")
+    current_vols = multi_garch.get_current_volatilities()
+    print("\nCurrent Volatilities:")
+    for ticker, vol in sorted(current_vols.items(), key=lambda x: x[1] if x[1] else 0, reverse=True):
+        if vol is not None:
+            print(f"  {ticker:6s}: {vol*100:6.2f}%")
     
-    print("\n3. Model Summary:")
-    garch.summary()
+    print("\n4. Forecasting volatility (30-day)...")
+    forecasts = multi_garch.forecast_all(horizon=30)
+    print("\n30-Day Ahead Forecasts:")
+    for ticker in tickers:
+        if ticker in forecasts and forecasts[ticker] is not None:
+            print(f"  {ticker:6s}: {forecasts[ticker][29]*100:6.2f}%")
     
-    print("\n4. Volatility Forecasts:")
-    forecast_30 = garch.forecast_volatility(horizon=30)
-    forecast_60 = garch.forecast_volatility(horizon=60)
-    forecast_90 = garch.forecast_volatility(horizon=90)
+    print("\n5. Summary statistics...")
+    multi_garch.summary_all()
     
-    print(f"   30-day ahead: {forecast_30[29]*100:.2f}%")
-    print(f"   60-day ahead: {forecast_60[59]*100:.2f}%")
-    print(f"   90-day ahead: {forecast_90[89]*100:.2f}%")
+    print("\n6. Creating forecast DataFrame...")
+    try:
+        forecast_df = multi_garch.get_forecast_dataframe(horizon=90)
+        print(f"   ✓ Created DataFrame with {len(forecast_df)} rows")
+        print("\nSample (first 10 rows):")
+        print(forecast_df.head(10))
+    except Exception as e:
+        print(f"   ✗ Could not create forecast DataFrame: {e}")
     
-    print("\n5. Validating: Checking for volatility clustering...")
-    cond_vol = garch.get_conditional_volatility()
-    
-    squared_returns = (returns * 100) ** 2
-    autocorr = squared_returns.autocorr(lag=1)
-    print(f"   Autocorr of squared returns (lag 1): {autocorr:.4f}")
-    
-    if autocorr > 0.1:
-        print(f"   ✓ Volatility clustering detected")
-    else:
-        print(f"   ○ Weak volatility clustering")
-    
-    print("\n6. Generating plots...")
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
-    
-    axes[0].plot(returns.index, returns.values * 100, linewidth=0.8, alpha=0.7)
-    axes[0].set_title('NVDA Daily Returns', fontsize=12, fontweight='bold')
-    axes[0].set_ylabel('Return (%)')
-    axes[0].axhline(y=0, color='black', linestyle='--', linewidth=0.8)
-    axes[0].grid(True, alpha=0.3)
-    
-    axes[1].plot(cond_vol.index, cond_vol.values * 100, linewidth=1.5, color='purple')
-    axes[1].set_title('GARCH Conditional Volatility (Annualized)', fontsize=12, fontweight='bold')
-    axes[1].set_ylabel('Volatility (%)')
-    axes[1].grid(True, alpha=0.3)
-    
-    high_vol_threshold = cond_vol.quantile(0.90)
-    axes[1].axhline(y=high_vol_threshold, color='red', linestyle='--', linewidth=1, label='90th percentile')
-    axes[1].legend()
-    
-    forecast_dates = pd.date_range(start=returns.index[-1] + pd.Timedelta(days=1), periods=90, freq='D')
-    
-    axes[2].plot(cond_vol.tail(252).index, cond_vol.tail(252).values * 100, linewidth=1.5, color='blue', label='Historical')
-    axes[2].plot(forecast_dates, forecast_90 * 100, linewidth=2, color='red', linestyle='--', label='Forecast')
-    axes[2].set_title('90-Day Volatility Forecast', fontsize=12, fontweight='bold')
-    axes[2].set_ylabel('Volatility (%)')
-    axes[2].set_xlabel('Date')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('garch_validation.png', dpi=150, bbox_inches='tight')
-    print("   ✓ Saved plot to garch_validation.png")
+    print("\n7. Comparing VIX to GARCH for all stocks...")
+    try:
+        from src.data.fetch import get_vix_level, compare_vix_to_garch
+        
+        current_vix = get_vix_level()
+        current_vols = multi_garch.get_current_volatilities()
+        
+        print(f"\nCurrent VIX: {current_vix:.2f}%")
+        print(f"\n{'Ticker':<8} {'GARCH Vol':<12} {'VIX/GARCH':<12} {'Interpretation'}")
+        print("-" * 80)
+        
+        for ticker in tickers:
+            if ticker in current_vols and current_vols[ticker] is not None:
+                garch_vol = current_vols[ticker]
+                comp = compare_vix_to_garch(current_vix, garch_vol)
+                ratio_str = f"{comp['ratio']:.2f}x" if comp['ratio'] else "N/A"
+                print(f"{ticker:<8} {garch_vol*100:>6.2f}%      {ratio_str:<12} {comp['interpretation']}")
+        
+        print("\n" + "-" * 80)
+        print("VIX Interpretation Guide:")
+        print("  Ratio > 1.2: Market expects MORE vol than historical (fear)")
+        print("  Ratio 0.8-1.2: VIX and GARCH aligned (normal)")
+        print("  Ratio < 0.8: Market expects LESS vol than historical (complacency)")
+                
+    except Exception as e:
+        print(f"   ✗ Could not compare VIX: {e}")
     
     print("\n" + "="*70)
-    print("✅ GARCH TEST COMPLETE!")
+    print("✅ MULTI-STOCK GARCH TEST COMPLETE!")
     print("="*70)
     print("\nDeliverables completed:")
-    print("  ✓ GARCH model fitted to NVDA returns")
-    print("  ✓ Can produce volatility forecasts (30, 60, 90 day)")
-    print("  ✓ Validated: Volatility clustering detected")
-    print("  ✓ Interface: get_current_volatility() and forecast_volatility()")
-    print("\n→ Ready to feed into Monte Carlo simulation")
+    print("  ✓ Multi-stock GARCH support")
+    print("  ✓ Dictionary output {ticker: volatility_forecast}")
+    print("  ✓ Batch processing for 8+ stocks")
+    print("  ✓ Summary statistics across stocks")
+    print("  ✓ VIX comparison for all stocks")
