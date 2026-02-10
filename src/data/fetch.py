@@ -38,8 +38,31 @@ def calculate_returns(data: pd.DataFrame, price_col: str = 'Adj Close') -> pd.Se
     
     returns = np.log(prices / prices.shift(1))
     returns = returns.dropna()
-    
+
     return returns
+
+
+def calculate_mu_sigma(returns: pd.Series) -> tuple:
+    """
+    Calculate annualized mean return (mu) and volatility (sigma) from daily returns.
+
+    Args:
+        returns: Series of daily log returns
+
+    Returns:
+        Tuple of (mu, sigma) - annualized values
+    """
+    TRADING_DAYS_PER_YEAR = 252
+
+    daily_mean = returns.mean()
+    daily_std = returns.std()
+
+    # Annualize
+    mu = daily_mean * TRADING_DAYS_PER_YEAR
+    sigma = daily_std * np.sqrt(TRADING_DAYS_PER_YEAR)
+
+    return mu, sigma
+
 
 def download_vix(start: str, end: str) -> pd.DataFrame:
     """
