@@ -17,16 +17,31 @@ class BubbleRiskAnalyzer:
     Analyzes bubble risk for a stock using 8 different indicators.
     """
     
-    def __init__(self, ticker: str, lookback_days: int = 365):
+    def __init__(self, ticker: str, lookback_days: int = 365, end_date: str = None):
+        """
+        Initialize analyzer for a stock.
+    
+        Args:
+            ticker: Stock symbol (e.g., 'NVDA')
+            lookback_days: Days of historical data to analyze
+            end_date: End date for analysis (YYYY-MM-DD). If None, uses today.
+        """
         self.ticker = ticker
         self.lookback_days = lookback_days
+        self.end_date = end_date
+    
+        # Download data
         self._download_data()
         
     def _download_data(self):
         """Download price and volume data."""
-        end_date = datetime.now()
+        if self.end_date:
+            end_date = datetime.strptime(self.end_date, '%Y-%m-%d')
+        else:
+            end_date = datetime.now()
+    
         start_date = end_date - timedelta(days=self.lookback_days + 100)
-        
+    
         print(f"Downloading {self.ticker} data...")
         self.data = yf.download(
             self.ticker,
@@ -35,14 +50,14 @@ class BubbleRiskAnalyzer:
             progress=False,
             auto_adjust=True
         )
-        
+    
         if self.data.empty:
             raise ValueError(f"No data found for {self.ticker}")
-        
+    
         # Get stock info
         stock = yf.Ticker(self.ticker)
         self.info = stock.info
-        
+    
         print(f"✓ Downloaded {len(self.data)} days of data")
     
     def _calculate_pe_score(self) -> float:
@@ -175,7 +190,8 @@ class BubbleRiskAnalyzer:
                 current_vix = float(vix_data['Close'].iloc[-1]) / 100
             
             returns = self.data['Close'].pct_change().dropna()
-            stock_vol = float(returns.std() * np.sqrt(252))
+            stock_vol = returns.std() * np.sqrt(252)
+            stock_vol = float(stock_vol.iloc[0]) if isinstance(stock_vol, pd.Series) else float(stock_vol)
             
             ratio = current_vix / stock_vol
             
@@ -251,9 +267,15 @@ class BubbleRiskAnalyzer:
                 print(f"  No peers defined for {self.ticker}")
                 return 50.0
             
-            # Download peer data (last 6 months)
-            end = datetime.now().strftime('%Y-%m-%d')
-            start = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+        
+            # Calculate date range based on historical end_date if provided
+            if self.end_date:
+                end_date_obj = datetime.strptime(self.end_date, '%Y-%m-%d')
+                end = self.end_date
+                start = (end_date_obj - timedelta(days=180)).strftime('%Y-%m-%d')
+            else:
+                end = datetime.now().strftime('%Y-%m-%d')
+                start = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
             
             stock_returns = self.data['Close'].pct_change().dropna()
             
@@ -318,31 +340,41 @@ class BubbleRiskAnalyzer:
         """Indicator 8: Price Acceleration"""
         try:
             closes = self.data['Close'].values.flatten()
-            
+        
             if len(closes) < 90:
                 return 50.0
-            
+        
+            # Calculate returns over different periods
             return_30d = (closes[-1] - closes[-30]) / closes[-30]
             return_60d = (closes[-1] - closes[-60]) / closes[-60]
             return_90d = (closes[-1] - closes[-90]) / closes[-90]
-            
+        
+            # Annualize
             annual_30d = (1 + return_30d) ** (252/30) - 1
             annual_60d = (1 + return_60d) ** (252/60) - 1
             annual_90d = (1 + return_90d) ** (252/90) - 1
-            
+        
+            # Average acceleration
             avg_acceleration = (annual_30d + annual_60d + annual_90d) / 3
-            
+        
+            # ADJUSTED THRESHOLDS - less aggressive
+            # Score based on acceleration
+            # <0%: declining, no risk (0-20)
+            # 0-50%: normal growth (20-50)
+            # 50-100%: elevated growth (50-75)
+            # >100%: parabolic, bubble risk (75-100)
+        
             if avg_acceleration < 0:
-                score = 20 * (1 + avg_acceleration)
-            elif avg_acceleration < 0.20:
-                score = 20 + (avg_acceleration / 0.20) * 20
-            elif avg_acceleration < 0.50:
-                score = 40 + ((avg_acceleration - 0.20) / 0.30) * 30
+                score = 20 * (1 + avg_acceleration)  # Negative reduces score
+            elif avg_acceleration < 0.50:  # Changed from 0.20
+                score = 20 + (avg_acceleration / 0.50) * 30
+            elif avg_acceleration < 1.00:  # Changed from 0.50
+                score = 50 + ((avg_acceleration - 0.50) / 0.50) * 25
             else:
-                score = 70 + min((avg_acceleration - 0.50) / 0.50 * 30, 30)
-            
+                score = 75 + min((avg_acceleration - 1.00) / 1.00 * 25, 25)
+        
             return float(np.clip(score, 0, 100))
-            
+        
         except Exception as e:
             print(f"Warning: Acceleration error: {e}")
             return 50.0
