@@ -1,7 +1,7 @@
-# sas-curiosity-cup-2025-kmj
+# sas-curiosity-cup-2026-kmj
 # Atlas: Multi-Factor Bubble Risk Detection and Portfolio Optimization System
 
-**SAS Curiosity Cup 2025 Submission**
+**SAS Curiosity Cup 2026 Submission**
 
 A quantitative financial risk analysis system combining volatility forecasting, behavioral indicators, and historical validation to detect asset bubbles and optimize portfolio allocation.
 
