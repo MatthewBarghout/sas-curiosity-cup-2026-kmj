@@ -555,7 +555,7 @@ Novel 8-factor composite methodology combining traditional technical analysis wi
 **Juan** - Google Trends sentiment integration, VIX analysis
 
 **Institution:** University of North Carolina at Chapel Hill
-**Competition:** SAS Curiosity Cup 2025
+**Competition:** SAS Curiosity Cup 2026
 **Repository:** https://github.com/MatthewBarghout/sas-curiosity-cup-2025-kmj
 
 
